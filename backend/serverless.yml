@@ -1,0 +1,202 @@
+service: cognito-mfa-auth
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  profile: training
+  runtime: nodejs18.x
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  environment:
+    REGION: ${self:provider.region}
+    USER_POOL_ID:
+      Ref: CognitoUserPool
+    CLIENT_ID:
+      Ref: CognitoUserPoolClient
+  httpApi:
+    cors:
+      allowedOrigins:
+        - '*'
+      allowedHeaders:
+        - Content-Type
+        - Authorization
+        - X-Amz-Date
+        - X-Api-Key
+        - X-Amz-Security-Token
+      allowedMethods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+        - OPTIONS
+      allowCredentials: false
+    authorizers:
+      cognitoAuthorizer:
+        type: jwt
+        identitySource: $request.header.Authorization
+        issuerUrl:
+          Fn::GetAtt:
+            - CognitoUserPool
+            - ProviderURL
+        audience:
+          - Ref: CognitoUserPoolClient
+
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - cognito-idp:AdminInitiateAuth
+            - cognito-idp:AdminRespondToAuthChallenge
+            - cognito-idp:AdminCreateUser
+            - cognito-idp:AdminSetUserPassword
+            - cognito-idp:AdminGetUser
+            - cognito-idp:AssociateSoftwareToken
+            - cognito-idp:VerifySoftwareToken
+            - cognito-idp:SetUserMFAPreference
+            - cognito-idp:AdminSetUserMFAPreference
+            - cognito-idp:AdminAssociateSoftwareToken
+            - cognito-idp:AdminVerifySoftwareToken
+          Resource: '*'
+
+functions:
+  signup:
+    handler: src/handlers/auth.signup
+    events:
+      - httpApi:
+          path: /auth/signup
+          method: post
+
+  login:
+    handler: src/handlers/auth.login
+    events:
+      - httpApi:
+          path: /auth/login
+          method: post
+
+  verifyMFA:
+    handler: src/handlers/auth.verifyMFA
+    events:
+      - httpApi:
+          path: /auth/verify-mfa
+          method: post
+
+  setupMFA:
+    handler: src/handlers/auth.setupMFA
+    events:
+      - httpApi:
+          path: /auth/setup-mfa
+          method: post
+          authorizer: cognitoAuthorizer
+
+  enableMFA:
+    handler: src/handlers/auth.enableMFA
+    events:
+      - httpApi:
+          path: /auth/enable-mfa
+          method: post
+          authorizer: cognitoAuthorizer
+
+  getMFAStatus:
+    handler: src/handlers/auth.getMFAStatus
+    events:
+      - httpApi:
+          path: /auth/mfa-status
+          method: get
+          authorizer: cognitoAuthorizer
+
+  disableMFA:
+    handler: src/handlers/auth.disableMFA
+    events:
+      - httpApi:
+          path: /auth/disable-mfa
+          method: post
+          authorizer: cognitoAuthorizer
+
+  protected:
+    handler: src/handlers/protected.handler
+    events:
+      - httpApi:
+          path: /api/protected
+          method: get
+          authorizer: cognitoAuthorizer
+
+resources:
+  Resources:
+    CognitoUserPool:
+      Type: AWS::Cognito::UserPool
+      Properties:
+        UserPoolName: ${self:service}-${self:provider.stage}
+        AutoVerifiedAttributes:
+          - email
+        UsernameAttributes:
+          - email
+        Policies:
+          PasswordPolicy:
+            MinimumLength: 8
+            RequireUppercase: true
+            RequireLowercase: true
+            RequireNumbers: true
+            RequireSymbols: true
+        # MFA configurado a nivel de pool: OPTIONAL permite a usuarios activar TOTP
+        MfaConfiguration: OPTIONAL
+        # Habilita el método SOFTWARE_TOKEN_MFA (TOTP / Authenticator apps)
+        EnabledMfas:
+          - SOFTWARE_TOKEN_MFA
+        Schema:
+          - Name: email
+            Required: true
+            Mutable: true
+          - Name: name
+            Required: false
+            Mutable: true
+
+    CognitoUserPoolClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        ClientName: ${self:service}-client-${self:provider.stage}
+        UserPoolId: !Ref CognitoUserPool
+        GenerateSecret: false
+        ExplicitAuthFlows:
+          - ALLOW_USER_PASSWORD_AUTH
+          - ALLOW_REFRESH_TOKEN_AUTH
+          - ALLOW_USER_SRP_AUTH
+        PreventUserExistenceErrors: ENABLED
+
+  Outputs:
+    UserPoolId:
+      Value: !Ref CognitoUserPool
+      Export:
+        Name: ${self:service}-${self:provider.stage}-UserPoolId
+
+    UserPoolClientId:
+      Value: !Ref CognitoUserPoolClient
+      Export:
+        Name: ${self:service}-${self:provider.stage}-UserPoolClientId
+
+    UserPoolArn:
+      Value: !GetAtt CognitoUserPool.Arn
+      Export:
+        Name: ${self:service}-${self:provider.stage}-UserPoolArn
+
+    HttpApiId:
+      Value:
+        Ref: HttpApi
+      Export:
+        Name: ${self:service}-${self:provider.stage}-HttpApiId
+
+    HttpApiEndpoint:
+      Value:
+        Fn::Join:
+          - ''
+          - - 'https://'
+            - Ref: HttpApi
+            - '.execute-api.'
+            - ${self:provider.region}
+            - '.amazonaws.com'
+      Export:
+        Name: ${self:service}-${self:provider.stage}-HttpApiEndpoint
+
+plugins:
+  - serverless-offline
