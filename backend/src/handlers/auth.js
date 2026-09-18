@@ -1,6 +1,12 @@
 const { CognitoIdentityProviderClient } = require('@aws-sdk/client-cognito-identity-provider');
 const { createCognitoAuthService } = require('../services/cognitoAuth');
-const { createResponse, parseBody, getAccessToken } = require('../utils/http');
+const { HTTP_STATUS, createResponse, parseBody, getAccessToken } = require('../utils/http');
+const logger = require('../utils/logger');
+
+const ERRORS = Object.freeze({
+  INVALID_MFA: 'Invalid MFA code',
+  AUTH_TOKEN_REQUIRED: 'Authorization token required',
+});
 
 const client = new CognitoIdentityProviderClient({ region: process.env.REGION });
 const authService = createCognitoAuthService({
@@ -40,13 +46,15 @@ const errorMessage = (error, fallback) => error.message || fallback;
 module.exports.signup = async (event) => {
   try {
     const { email, password, name } = parseBody(event);
-    if (!email || !password) return createResponse(400, { error: 'Email and password are required' });
+    if (!email || !password) {
+      return createResponse(HTTP_STATUS.BAD_REQUEST, { error: 'Email and password are required' });
+    }
 
     await authService.signUp({ email, password, name });
-    return createResponse(200, { message: 'User created successfully', email });
+    return createResponse(HTTP_STATUS.OK, { message: 'User created successfully', email });
   } catch (error) {
-    console.error('Signup error:', error);
-    return createResponse(500, { error: errorMessage(error, 'Error creating user') });
+    logger.error('Signup error', error);
+    return createResponse(HTTP_STATUS.INTERNAL_ERROR, { error: errorMessage(error, 'Error creating user') });
   }
 };
 
@@ -59,11 +67,13 @@ module.exports.signup = async (event) => {
 module.exports.login = async (event) => {
   try {
     const { email, password } = parseBody(event);
-    if (!email || !password) return createResponse(400, { error: 'Email and password are required' });
+    if (!email || !password) {
+      return createResponse(HTTP_STATUS.BAD_REQUEST, { error: 'Email and password are required' });
+    }
 
     const result = await authService.initiateLogin({ email, password });
     if (result.ChallengeName === 'SOFTWARE_TOKEN_MFA') {
-      return createResponse(200, {
+      return createResponse(HTTP_STATUS.OK, {
         challengeName: result.ChallengeName,
         session: result.Session,
         username: result.ChallengeParameters?.USERNAME || email,
@@ -72,13 +82,13 @@ module.exports.login = async (event) => {
     }
 
     if (!result.AuthenticationResult) {
-      return createResponse(500, { error: 'Authentication failed: No authentication result received' });
+      return createResponse(HTTP_STATUS.INTERNAL_ERROR, { error: 'Authentication failed: No authentication result received' });
     }
 
-    return createResponse(200, tokensFromResult(result.AuthenticationResult));
+    return createResponse(HTTP_STATUS.OK, tokensFromResult(result.AuthenticationResult));
   } catch (error) {
-    console.error('Login error:', error);
-    return createResponse(401, { error: errorMessage(error, 'Invalid credentials') });
+    logger.error('Login error', error);
+    return createResponse(HTTP_STATUS.UNAUTHORIZED, { error: errorMessage(error, 'Invalid credentials') });
   }
 };
 
@@ -92,7 +102,7 @@ module.exports.verifyMFA = async (event) => {
   try {
     const { session, code, username } = parseBody(event);
     if (!session || !code || !username?.trim()) {
-      return createResponse(400, { error: 'Session, MFA code and username are required' });
+      return createResponse(HTTP_STATUS.BAD_REQUEST, { error: 'Session, MFA code and username are required' });
     }
 
     const result = await authService.verifyMfa({
@@ -101,12 +111,17 @@ module.exports.verifyMFA = async (event) => {
       username: username.trim(),
     });
 
-    if (!result.AuthenticationResult) return createResponse(401, { error: 'Invalid MFA code' });
-    return createResponse(200, tokensFromResult(result.AuthenticationResult));
+    if (!result.AuthenticationResult) {
+      return createResponse(HTTP_STATUS.UNAUTHORIZED, { error: ERRORS.INVALID_MFA });
+    }
+    return createResponse(HTTP_STATUS.OK, tokensFromResult(result.AuthenticationResult));
   } catch (error) {
-    console.error('MFA verification error:', error);
-    const statusCode = ['NotAuthorizedException', 'CodeMismatchException'].includes(error.name) ? 401 : 500;
-    return createResponse(statusCode, { error: errorMessage(error, 'Invalid MFA code') });
+    logger.error('MFA verification error', error);
+    let statusCode = HTTP_STATUS.INTERNAL_ERROR;
+    if (['NotAuthorizedException', 'CodeMismatchException'].includes(error.name)) {
+      statusCode = HTTP_STATUS.UNAUTHORIZED;
+    }
+    return createResponse(statusCode, { error: errorMessage(error, ERRORS.INVALID_MFA) });
   }
 };
 
@@ -119,16 +134,23 @@ module.exports.verifyMFA = async (event) => {
 module.exports.setupMFA = async (event) => {
   try {
     const accessToken = getAccessToken(event);
-    if (!accessToken) return createResponse(401, { error: 'Authorization token required' });
+    if (!accessToken) {
+      return createResponse(HTTP_STATUS.UNAUTHORIZED, { error: ERRORS.AUTH_TOKEN_REQUIRED });
+    }
 
     const result = await authService.associateSoftwareToken(accessToken);
-    return createResponse(200, {
+    return createResponse(HTTP_STATUS.OK, {
       secretCode: result.SecretCode,
       message: 'Scan this QR code with your authenticator app',
     });
   } catch (error) {
-    console.error('Setup MFA error:', error);
-    const statusCode = error.name === 'NotAuthorizedException' ? 401 : error.name === 'InvalidParameterException' ? 400 : 500;
+    logger.error('Setup MFA error', error);
+    let statusCode = HTTP_STATUS.INTERNAL_ERROR;
+    if (error.name === 'NotAuthorizedException') {
+      statusCode = HTTP_STATUS.UNAUTHORIZED;
+    } else if (error.name === 'InvalidParameterException') {
+      statusCode = HTTP_STATUS.BAD_REQUEST;
+    }
     return createResponse(statusCode, { error: errorMessage(error, 'Error setting up MFA') });
   }
 };
@@ -143,14 +165,18 @@ module.exports.enableMFA = async (event) => {
   try {
     const { code } = parseBody(event);
     const accessToken = getAccessToken(event);
-    if (!accessToken || !code) return createResponse(400, { error: 'Authorization token and MFA code are required' });
+    if (!accessToken || !code) {
+      return createResponse(HTTP_STATUS.BAD_REQUEST, { error: 'Authorization token and MFA code are required' });
+    }
 
     const result = await authService.enableMfa(accessToken, String(code).trim());
-    if (result.Status !== 'SUCCESS') return createResponse(400, { error: 'Invalid MFA code' });
-    return createResponse(200, { message: 'MFA enabled successfully' });
+    if (!result.success) {
+      return createResponse(HTTP_STATUS.BAD_REQUEST, { error: ERRORS.INVALID_MFA });
+    }
+    return createResponse(HTTP_STATUS.OK, { message: 'MFA enabled successfully' });
   } catch (error) {
-    console.error('Enable MFA error:', error);
-    return createResponse(500, { error: errorMessage(error, 'Error enabling MFA') });
+    logger.error('Enable MFA error', error);
+    return createResponse(HTTP_STATUS.INTERNAL_ERROR, { error: errorMessage(error, 'Error enabling MFA') });
   }
 };
 
@@ -163,21 +189,23 @@ module.exports.enableMFA = async (event) => {
 module.exports.getMFAStatus = async (event) => {
   try {
     const accessToken = getAccessToken(event);
-    if (!accessToken) return createResponse(401, { error: 'Authorization token required' });
+    if (!accessToken) {
+      return createResponse(HTTP_STATUS.UNAUTHORIZED, { error: ERRORS.AUTH_TOKEN_REQUIRED });
+    }
 
     const user = await authService.getUser(accessToken);
     const mfaEnabled = user.MFAOptions?.some(option => option.DeliveryMedium === 'SOFTWARE_TOKEN') ||
       user.PreferredMfaSetting === 'SOFTWARE_TOKEN_MFA';
 
-    return createResponse(200, {
+    return createResponse(HTTP_STATUS.OK, {
       mfaEnabled: Boolean(mfaEnabled),
       preferredMfa: user.PreferredMfaSetting || null,
       mfaOptions: user.MFAOptions || [],
       userAttributes: user.UserAttributes || [],
     });
   } catch (error) {
-    console.error('Get MFA status error:', error);
-    return createResponse(500, { error: errorMessage(error, 'Error getting MFA status') });
+    logger.error('Get MFA status error', error);
+    return createResponse(HTTP_STATUS.INTERNAL_ERROR, { error: errorMessage(error, 'Error getting MFA status') });
   }
 };
 
@@ -190,12 +218,14 @@ module.exports.getMFAStatus = async (event) => {
 module.exports.disableMFA = async (event) => {
   try {
     const accessToken = getAccessToken(event);
-    if (!accessToken) return createResponse(401, { error: 'Authorization token required' });
+    if (!accessToken) {
+      return createResponse(HTTP_STATUS.UNAUTHORIZED, { error: ERRORS.AUTH_TOKEN_REQUIRED });
+    }
 
     await authService.disableMfa(accessToken);
-    return createResponse(200, { message: 'MFA disabled successfully' });
+    return createResponse(HTTP_STATUS.OK, { message: 'MFA disabled successfully' });
   } catch (error) {
-    console.error('Disable MFA error:', error);
-    return createResponse(500, { error: errorMessage(error, 'Error disabling MFA') });
+    logger.error('Disable MFA error', error);
+    return createResponse(HTTP_STATUS.INTERNAL_ERROR, { error: errorMessage(error, 'Error disabling MFA') });
   }
 };

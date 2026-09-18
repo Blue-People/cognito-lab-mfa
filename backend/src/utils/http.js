@@ -5,6 +5,13 @@ const RESPONSE_HEADERS = {
   'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
 };
 
+const HTTP_STATUS = Object.freeze({
+  OK: 200,
+  BAD_REQUEST: 400,
+  UNAUTHORIZED: 401,
+  INTERNAL_ERROR: 500,
+});
+
 /**
  * Creates an API Gateway-compatible JSON response.
  *
@@ -26,7 +33,9 @@ const createResponse = (statusCode, body) => ({
  * @throws {Error} When the body is not valid JSON.
  */
 const parseBody = (event) => {
-  if (!event?.body) return {};
+  if (!event?.body) {
+    return {};
+  }
   return typeof event.body === 'string' ? JSON.parse(event.body) : event.body;
 };
 
@@ -42,4 +51,4 @@ const getAccessToken = (event) => {
   return authorization.replace(/^Bearer\s+/i, '').trim();
 };
 
-module.exports = { createResponse, parseBody, getAccessToken };
+module.exports = { HTTP_STATUS, createResponse, parseBody, getAccessToken };
