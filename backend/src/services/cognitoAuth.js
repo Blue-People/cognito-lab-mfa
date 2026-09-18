@@ -87,20 +87,22 @@ const createCognitoAuthService = ({ client, userPoolId, clientId }) => ({
    *
    * @param {string} accessToken Cognito access token.
    * @param {string} code TOTP code.
-   * @returns {Promise<object>} Verification response.
+  * @returns {Promise<{success: boolean, verification: object}>} Verification result with an explicit outcome.
    */
   async enableMfa(accessToken, code) {
     const verification = await client.send(new VerifySoftwareTokenCommand({
       AccessToken: accessToken,
       UserCode: code,
     }));
-    if (verification.Status !== 'SUCCESS') return verification;
+    if (verification.Status !== 'SUCCESS') {
+      return { success: false, verification };
+    }
 
     await client.send(new SetUserMFAPreferenceCommand({
       AccessToken: accessToken,
       SoftwareTokenMfaSettings: { Enabled: true, PreferredMfa: true },
     }));
-    return verification;
+    return { success: true, verification };
   },
 
   /**
