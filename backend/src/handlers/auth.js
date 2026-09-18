@@ -150,8 +150,6 @@ module.exports.setupMFA = async (event) => {
       statusCode = HTTP_STATUS.UNAUTHORIZED;
     } else if (error.name === 'InvalidParameterException') {
       statusCode = HTTP_STATUS.BAD_REQUEST;
-    } else {
-      statusCode = HTTP_STATUS.INTERNAL_ERROR;
     }
     return createResponse(statusCode, { error: errorMessage(error, 'Error setting up MFA') });
   }
